@@ -19,8 +19,8 @@ def test_extract_alphabet_orders_by_codepoint():
     mod = _load_module()
     fake_meta = {
         b"lines": (
-            b'{"type":"kraken_recognition_bbox","alphabet":'
-            b'{"\u1040":1,"\u1000":2,"\u1021":3}}'
+            rb'{"type":"kraken_recognition_bbox","alphabet":'
+            rb'{"\u1040":1,"\u1000":2,"\u1021":3}}'
         )
     }
     chars = mod.extract_alphabet_chars(fake_meta)
@@ -32,8 +32,8 @@ def test_extract_alphabet_char_count():
     mod = _load_module()
     fake_meta = {
         b"lines": (
-            b'{"type":"kraken_recognition_bbox","alphabet":'
-            b'{"\u1000":2,"\u1001":5}}'
+            rb'{"type":"kraken_recognition_bbox","alphabet":'
+            rb'{"\u1000":2,"\u1001":5}}'
         )
     }
     chars = mod.extract_alphabet_chars(fake_meta)
@@ -56,3 +56,30 @@ def test_dict_line_is_one_char_plus_newline():
     mod = _load_module()
     assert mod.format_dict_line("\u1000") == "\u1000\n"
     assert mod.format_dict_line(" ") == " \n"
+
+
+def test_find_oov_chars_returns_oov_set():
+    mod = _load_module()
+    oov = mod.find_oov_chars("ကခgaza", alphabet={"က", "ခ"})
+    assert oov == {"g", "a", "z"}
+
+
+def test_find_oov_chars_empty_when_all_in_alphabet():
+    mod = _load_module()
+    assert mod.find_oov_chars("ကခ", alphabet={"က", "ခ"}) == set()
+
+
+def test_is_clean_returns_true_when_no_oov():
+    mod = _load_module()
+    assert mod.is_clean("ကခ", alphabet={"က", "ခ"}) is True
+
+
+def test_is_clean_returns_false_when_oov():
+    mod = _load_module()
+    assert mod.is_clean("ကx", alphabet={"က"}) is False
+
+
+def test_is_clean_empty_text_is_not_clean():
+    """Empty transcriptions become empty labels — drop them."""
+    mod = _load_module()
+    assert mod.is_clean("", alphabet={"က"}) is False

@@ -56,3 +56,17 @@ def format_dict_line(char: str) -> str:
     automatically — do NOT add them here.
     """
     return f"{char}\n"
+
+
+def find_oov_chars(text: str, alphabet: set[str]) -> set[str]:
+    """Return the set of chars in `text` not present in `alphabet`."""
+    return {c for c in text if c not in alphabet}
+
+
+def is_clean(text: str, alphabet: set[str]) -> bool:
+    """True if text is non-empty and contains only in-alphabet chars.
+
+    Empty texts are rejected (they would yield empty labels and be dropped
+    downstream anyway, but we drop them explicitly with a count).
+    """
+    return len(text) > 0 and not find_oov_chars(text, alphabet)
