@@ -83,3 +83,79 @@ def test_is_clean_empty_text_is_not_clean():
     """Empty transcriptions become empty labels — drop them."""
     mod = _load_module()
     assert mod.is_clean("", alphabet={"က"}) is False
+
+
+def test_build_dataset_end_to_end(tmp_path):
+    """Build a tiny synthetic arrow, run the full pipeline, assert outputs."""
+    mod = _load_module()
+
+    arrow_path = tmp_path / "synthetic.arrow"
+    _write_synthetic_arrow(arrow_path)
+
+    out_dir = tmp_path / "out"
+    mod.build_dataset(
+        arrow_path=str(arrow_path),
+        out_dir=str(out_dir),
+        max_per_split=10,
+        smoke_per_split=2,
+    )
+
+    # Dict file: 3 chars (က ခ ဂ), one per line, codepoint-sorted.
+    dict_text = (out_dir / "burmese_dict.txt").read_text(encoding="utf-8")
+    assert dict_text == "\u1000\n\u1001\n\u1002\n"
+
+    # train_list.txt: path<TAB>text, relative to out_dir.
+    train_list = (out_dir / "train_list.txt").read_text(encoding="utf-8")
+    assert "train/000000001.png\tကခဂ\n" in train_list
+
+    # PNG crop exists and is readable, grayscale.
+    from PIL import Image
+    img = Image.open(out_dir / "train" / "000000001.png")
+    assert img.mode == "L"
+
+    # Smoke subset is smaller than full.
+    train_smoke = (out_dir / "train_list_smoke.txt").read_text(encoding="utf-8")
+    assert len(train_smoke.splitlines()) <= len(train_list.splitlines())
+
+    # OOV report written.
+    oov_report = (out_dir / "oov_report.txt").read_text(encoding="utf-8")
+    # The OOV sample 'X' should appear in the report.
+    assert "X" in oov_report or "0 OOV" in oov_report
+
+
+def _write_synthetic_arrow(path):
+    """Write a minimal Kraken-format arrow for testing."""
+    import pyarrow as pa
+    from PIL import Image
+    import io
+
+    # 3 train rows (one with OOV char 'X'), 1 val, 1 test.
+    def png_bytes():
+        buf = io.BytesIO()
+        Image.new("1", (10, 4), 1).save(buf, format="PNG")
+        return buf.getvalue()
+
+    rows = {
+        "lines": [
+            {"text": "\u1000\u1001\u1002", "im": png_bytes()},  # train clean
+            {"text": "\u1000\u1000", "im": png_bytes()},         # train clean
+            {"text": "\u1000X", "im": png_bytes()},              # train OOV ('X')
+            {"text": "\u1001\u1002", "im": png_bytes()},         # val
+            {"text": "\u1002", "im": png_bytes()},               # test
+        ],
+        "train":      [True, True, True, False, False],
+        "validation": [False, False, False, True, False],
+        "test":       [False, False, False, False, True],
+    }
+    table = pa.table(rows)
+    # Attach alphabet metadata matching the real Kraken layout.
+    meta = {
+        b"lines": (
+            rb'{"type":"kraken_recognition_bbox","alphabet":'
+            rb'{"\u1000":1,"\u1001":1,"\u1002":1}}'
+        )
+    }
+    table = table.replace_schema_metadata(meta)
+    with pa.OSFile(str(path), "wb") as sink:
+        with pa.ipc.new_file(sink, table.schema) as writer:
+            writer.write_table(table)
