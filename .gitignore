@@ -38,3 +38,7 @@ test_tipc/web/node_modules/
 
 .venv/
 .worktrees/
+
+# Burmese rec fine-tune artifacts (large / regeneratable)
+/PP-OCRv6_small_rec_pretrained.pdparams
+/models/burmese_PP-OCRv6_small_rec_infer/
