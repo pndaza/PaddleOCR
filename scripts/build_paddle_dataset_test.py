@@ -38,3 +38,21 @@ def test_extract_alphabet_char_count():
     }
     chars = mod.extract_alphabet_chars(fake_meta)
     assert len(chars) == 2
+
+
+def test_format_label_line_uses_tab_separator():
+    mod = _load_module()
+    line = mod.format_label_line("train/000000001.png", "မင်္ဂလာပါ")
+    assert line == "train/000000001.png\tမင်္ဂလာပါ\n"
+
+
+def test_format_label_line_preserves_special_chars():
+    mod = _load_module()
+    line = mod.format_label_line("train/000000002.png", "ဈ = ၅")
+    assert line == "train/000000002.png\tဈ = ၅\n"
+
+
+def test_dict_line_is_one_char_plus_newline():
+    mod = _load_module()
+    assert mod.format_dict_line("\u1000") == "\u1000\n"
+    assert mod.format_dict_line(" ") == " \n"

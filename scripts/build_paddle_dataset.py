@@ -38,3 +38,21 @@ def extract_alphabet_chars(metadata: dict) -> list[str]:
     data = json.loads(raw)
     alphabet = data["alphabet"]  # {char: count}
     return sorted(alphabet.keys(), key=lambda c: ord(c))
+
+
+def format_label_line(rel_path: str, text: str) -> str:
+    """One label-file row: `<rel_path><TAB><text><newline>`.
+
+    PaddleOCR's SimpleDataSet splits on a literal tab; any other separator
+    errors. Paths are relative to the config's `data_dir`.
+    """
+    return f"{rel_path}\t{text}\n"
+
+
+def format_dict_line(char: str) -> str:
+    """One dict-file row: the single char plus a newline.
+
+    PaddleOCR appends the CTC blank and (if use_space_char) a space token
+    automatically — do NOT add them here.
+    """
+    return f"{char}\n"
