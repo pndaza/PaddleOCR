@@ -25,8 +25,10 @@
 # The 'train' phase launches in tmux so it survives SSH disconnects.
 #
 # Env vars (override on the CLI, e.g. EPOCHS=10 bash train_gpu.sh train):
-#   EPOCHS (30), BATCH_SIZE (128 — RTX 5060 has 16GB; see note below),
-#   FORK_URL, FORK_BRANCH, PADDLE_WHEEL_URL, DATASET_ZIP_URL.
+#   EPOCHS (30), BATCH_SIZE (64 — RTX 5060 has 16GB; see note below),
+#   FORK_URL, FORK_BRANCH,
+#   PADDLE_INDEX, PADDLE_PKG, PADDLE_WHEEL_URL (empty = use Baidu index),
+#   DATASET_ZIP_URL.
 
 set -euo pipefail
 
@@ -38,9 +40,16 @@ REPO="${REPO:-${WORKDIR}/PaddleOCR}"
 FORK_URL="${FORK_URL:-https://github.com/pndaza/PaddleOCR.git}"
 FORK_BRANCH="${FORK_BRANCH:-burmese-rec-finetune}"
 
-# Paddle GPU wheel (Dropbox mirror of paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl).
-# Paddle 3.x is NOT on PyPI (only 2.6.x); Baidu CDN is slow from cloud boxes.
-PADDLE_WHEEL_URL="${PADDLE_WHEEL_URL:-https://www.dropbox.com/scl/fi/71xe2qpsxd31e5wpe4k17/paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl?rlkey=qz4u9xupt42x9kdc6561l1fia&st=7wx7lezq&dl=1}"
+# Paddle GPU install source. Two options:
+#   1. (default) PADDLE_INDEX — Baidu's PEP 503 simple index. pip resolves the
+#      correct wheel for whatever Python the box runs (cp39/310/311/312/313).
+#      Direct .whl URLs on Baidu's CDN return empty bodies, so the index route
+#      is required. Paddle 3.x is NOT on PyPI (only 2.6.x).
+#   2. PADDLE_WHEEL_URL — a direct .whl URL (e.g. a Dropbox mirror). Use ONLY if
+#      it matches the box's Python tag exactly (cp312 wheel won't install on 3.10).
+PADDLE_INDEX="${PADDLE_INDEX:-https://www.paddlepaddle.org.cn/packages/stable/cu126/}"
+PADDLE_PKG="${PADDLE_PKG:-paddlepaddle-gpu==3.2.0}"
+PADDLE_WHEEL_URL="${PADDLE_WHEEL_URL:-}"
 
 # Pre-built dataset zip (Dropbox mirror of train_data/burmese_rec/, 1.3 GB).
 DATASET_ZIP_URL="${DATASET_ZIP_URL:-https://www.dropbox.com/scl/fi/ibvp1cjeoi6jlnjp34icm/burmese_rec_dataset.zip?rlkey=00iknrubirk4ubcfayiji8bn6&st=v3175nwf&dl=1}"
@@ -56,10 +65,21 @@ CFG="${REPO}/configs/rec/PP-OCRv6/burmese_PP-OCRv6_small_rec.yml"
 OUT="${REPO}/output/burmese_PP-OCRv6_small_rec"
 
 # Detect pip flag for Ubuntu 24.04 (externally-managed-environment restriction).
-PIP_INSTALL="pip install"
+PIP_INSTALL=(python3 -m pip install)
 if python3 -c "import sysconfig, os; sys.exit(0 if os.path.exists(os.path.join(sysconfig.get_path('stdlib'), 'EXTERNALLY-MANAGED')) else 1)" 2>/dev/null; then
-  PIP_INSTALL="pip install --break-system-packages"
+  PIP_INSTALL+=(--break-system-packages)
 fi
+
+# Ensure pip exists (minimal vast.ai images ship neither pip nor ensurepip).
+ensure_pip() {
+  if python3 -m pip --version >/dev/null 2>&1; then return 0; fi
+  log "pip not found — bootstrapping via get-pip.py"
+  curl -fsSL https://bootstrap.pypa.io/get-pip.py -o /tmp/get-pip.py
+  python3 /tmp/get-pip.py
+  rm -f /tmp/get-pip.py
+  python3 -m pip --version >/dev/null 2>&1 || { log "ERROR: pip bootstrap failed"; exit 1; }
+  log "pip bootstrapped: $(python3 -m pip --version)"
+}
 
 log() { printf '\n[setup] %s\n' "$*"; }
 
@@ -85,17 +105,26 @@ do_setup() {
   if python3 -c "import paddle; assert paddle.device.is_compiled_with_cuda()" 2>/dev/null; then
     log "paddle $(python3 -c 'import paddle; print(paddle.__version__)') already CUDA-built — skipping install"
   else
-    log "installing paddle from wheel: $PADDLE_WHEEL_URL"
-    wheel="/tmp/paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl"
-    curl -L --fail -C - -o "$wheel" "$PADDLE_WHEEL_URL"
-    $PIP_INSTALL "$wheel"
+    ensure_pip
+    if [[ -n "$PADDLE_WHEEL_URL" ]]; then
+      log "installing paddle from wheel: $PADDLE_WHEEL_URL"
+      # Match the wheel's Python tag to avoid silent cp-mismatch failures.
+      wheel="/tmp/paddlepaddle_gpu.whl"
+      curl -L --fail -C - -o "$wheel" "$PADDLE_WHEEL_URL"
+      "${PIP_INSTALL[@]}" "$wheel"
+    else
+      log "installing ${PADDLE_PKG} from Baidu index ${PADDLE_INDEX} (pip picks the cp tag for this Python)"
+      "${PIP_INSTALL[@]}" --timeout 300 --retries 5 \
+        -i "$PADDLE_INDEX" "$PADDLE_PKG"
+    fi
     python3 -c "import paddle; assert paddle.device.is_compiled_with_cuda(), 'paddle NOT compiled with CUDA — wrong wheel'"
     log "OK: paddle $(python3 -c 'import paddle; print(paddle.__version__)') installed, CUDA compiled"
   fi
 
   # 3. Install PaddleOCR repo requirements.
   log "installing repo requirements.txt"
-  $PIP_INSTALL -r "$REPO/requirements.txt"
+  ensure_pip
+  "${PIP_INSTALL[@]}" -r "$REPO/requirements.txt"
 
   # 4. Download the pre-built dataset zip + unzip.
   if [[ -f "$REPO/train_data/burmese_rec/burmese_dict.txt" ]]; then
@@ -225,7 +254,8 @@ Usage: bash $0 {setup|train|export|eval|all}
   all     setup + train (then manually run export + eval after training)
 
 Env vars: EPOCHS (30), BATCH_SIZE (64), FORK_URL, FORK_BRANCH,
-          PADDLE_WHEEL_URL, DATASET_ZIP_URL, WORKDIR, REPO
+          PADDLE_INDEX, PADDLE_PKG, PADDLE_WHEEL_URL, DATASET_ZIP_URL,
+          WORKDIR, REPO
 EOF
     exit 1
     ;;
