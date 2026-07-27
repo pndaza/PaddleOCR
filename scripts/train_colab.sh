@@ -96,6 +96,46 @@ trap cleanup EXIT
 log() { printf '\n[script] %s\n' "$*"; }
 
 # ---------------------------------------------------------------------------
+# RELIABLE ERROR CHECKING across the colab-exec boundary.
+#
+# `colab exec` runs the cell in a Jupyter kernel, which SWALLOWS SystemExit
+# (IPython prints the traceback but the process keeps running). As a result
+# `colab exec` returns 0 even when the inner Python raised SystemExit(1) —
+# confirmed empirically. So `set -e` and `$?` checks are USELESS here.
+#
+# Workaround: each step writes a sentinel file at the END of its happy path.
+# run_step checks for the sentinel; if missing, the step failed and we abort.
+# Sentinels are VM-local (on /content), queried via a tiny colab exec.
+# ---------------------------------------------------------------------------
+SENTINEL_DIR="/content/.steps"
+
+# run_step <name>: verify the named step's sentinel exists on the VM.
+# Usage: run_step clone   # after a `colab exec` block that should touch /content/.steps/clone.ok
+run_step() {
+  local name="$1"
+  local out
+  out="$("$COLAB" exec -s "$SESSION" --timeout 30 <<EOF
+import os, sys
+ok = os.path.exists("${SENTINEL_DIR}/${name}.ok")
+print("SENTINEL_PRESENT" if ok else "SENTINEL_MISSING")
+EOF
+)"
+  if echo "$out" | grep -q "SENTINEL_PRESENT"; then
+    echo "[script] ✓ step '${name}' OK"
+  else
+    echo "[script] ✗ step '${name}' FAILED — aborting (see traceback above)." >&2
+    echo "[script]   (colab exec masks Python failures; sentinel check caught it.)" >&2
+    exit 1
+  fi
+}
+
+# Inside each step's colab-exec heredoc, the happy path ends with:
+#   import os; os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/<name>.ok","w").close()
+# That sentinel is what run_step checks. If the step raises before reaching it,
+# the sentinel is never written and run_step aborts the whole script.
+
+
+# ---------------------------------------------------------------------------
 # PREFLIGHT
 # ---------------------------------------------------------------------------
 log "preflight checks"
@@ -139,7 +179,7 @@ log "provisioning ${GPU} session '${SESSION}' (this can take ~30s)"
 # ---------------------------------------------------------------------------
 log "cloning fork ${FORK_BRANCH} from ${FORK_URL}"
 "$COLAB" exec -s "$SESSION" --timeout 300 <<EOF
-import subprocess, sys
+import subprocess, sys, os
 r = subprocess.run(
     ["git", "clone", "--branch", "${FORK_BRANCH}", "--depth", "1",
      "${FORK_URL}", "${VM_REPO}"],
@@ -147,105 +187,101 @@ r = subprocess.run(
 print(r.stdout, end="")
 if r.returncode != 0:
     print(r.stderr, file=sys.stderr)
-    raise SystemExit(r.returncode)
+    sys.exit("__CLONE_FAILED__")   # signal failure (sentinel won't be written)
 # Remove the only remote so NO push (to fork or upstream) is possible from the VM.
 sub = subprocess.run(["git", "-C", "${VM_REPO}", "remote", "remove", "origin"],
                      capture_output=True, text=True)
 print("removed 'origin' remote (upstream-push safeguard):", sub.stdout.strip() or sub.stderr.strip())
-# Sanity: no remotes remain.
-chk = subprocess.run(["git", "-C", "${VM_REPO}", "remote", "-v"],
-                     capture_output=True, text=True)
+chk = subprocess.run(["git", "-C", "${VM_REPO}", "remote", "-v"], capture_output=True, text=True)
 print("remaining remotes:", repr(chk.stdout.strip()) or "(none)")
+# SUCCESS: write sentinel LAST.
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/clone.ok","w").close()
 EOF
+run_step clone
 
 # ---------------------------------------------------------------------------
 # 3. INSTALL PADDLE (GPU) + REPO REQUIREMENTS
 # ---------------------------------------------------------------------------
 log "installing ${PADDLE_PKG} from Baidu cu126 index (this can take a few minutes)"
-# Run pip directly on the VM via `colab exec` — `colab install` doesn't accept
-# pip's -i/--extra-index-url flags, so we bypass it for the index-URL case.
-# The Baidu CDN (paddle-whl.bj.bcebos.com) is 1.9 GB and has timed out from
-# Colab's network before, so raise pip's read timeout and retry count well
-# above defaults.
 "$COLAB" exec -s "$SESSION" --timeout 1800 <<EOF
-import subprocess, sys
+import subprocess, sys, os
 r = subprocess.run(
     [sys.executable, "-m", "pip", "install",
-     "--timeout", "300",       # per-read timeout (s); default 15 is too short for 1.9 GB
-     "--retries", "5",         # retry on transient CDN errors
+     "--timeout", "300", "--retries", "5",
      "-i", "${PADDLE_INDEX}",
      "${PADDLE_PKG}"],
     capture_output=True, text=True)
 print(r.stdout[-2000:])
 if r.returncode != 0:
-    print(r.stderr[-2000:], file=sys.stderr)
-    raise SystemExit(r.returncode)
-# Verify the GPU build actually loaded.
+    print(r.stderr[-2000:], file=sys.stderr); sys.exit("__PADDLE_FAILED__")
 import paddle
-assert paddle.device.is_compiled_with_cuda(), \
-    "paddlepaddle-gpu installed but NOT compiled with CUDA — wrong wheel"
+assert paddle.device.is_compiled_with_cuda(), "paddle NOT compiled with CUDA — wrong wheel"
 print(f"OK: paddle {paddle.__version__}, cuda compiled: {paddle.device.is_compiled_with_cuda()}")
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/paddle.ok","w").close()
 EOF
+run_step paddle
 
 log "installing repo requirements.txt"
-# `colab install -r` reads the file from the LOCAL machine, not the VM, so it
-# can't see /content/PaddleOCR/requirements.txt. Run pip on the VM against the
-# already-cloned file instead.
 "$COLAB" exec -s "$SESSION" --timeout 600 <<EOF
-import subprocess, sys
-r = subprocess.run(
-    [sys.executable, "-m", "pip", "install", "-r", "${VM_REPO}/requirements.txt"],
-    capture_output=True, text=True)
+import subprocess, sys, os
+r = subprocess.run([sys.executable, "-m", "pip", "install", "-r", "${VM_REPO}/requirements.txt"],
+                   capture_output=True, text=True)
 print(r.stdout[-1500:])
 if r.returncode != 0:
-    print(r.stderr[-1500:], file=sys.stderr)
-    raise SystemExit(r.returncode)
+    print(r.stderr[-1500:], file=sys.stderr); sys.exit("__REQS_FAILED__")
 print("OK: repo requirements installed")
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/reqs.ok","w").close()
 EOF
+run_step reqs
 
 # ---------------------------------------------------------------------------
 # 4. DOWNLOAD DATA (HuggingFace) + PRETRAINED WEIGHTS
 # ---------------------------------------------------------------------------
+# NOTE: `huggingface-cli` is DEPRECATED on Colab (exits 1, no-op). Use `hf`.
 log "downloading ${HF_FILE} from HuggingFace ${HF_DATASET} (~1.1 GB)"
-"$COLAB" exec -s "$SESSION" --timeout 600 <<EOF
+"$COLAB" exec -s "$SESSION" --timeout 900 <<EOF
 import subprocess, os, sys
 os.makedirs("${VM_DATA}", exist_ok=True)
 if os.path.exists("${VM_ARROW}"):
     print(f"data already present at ${VM_ARROW} ({os.path.getsize('${VM_ARROW}')//1024//1024} MB)")
 else:
     r = subprocess.run(
-        ["huggingface-cli", "download", "${HF_DATASET}", "${HF_FILE}",
+        ["hf", "download", "${HF_DATASET}", "${HF_FILE}",
          "--repo-type", "dataset", "--local-dir", "${VM_DATA}"],
         capture_output=True, text=True)
     print(r.stdout, end="")
     if r.returncode != 0:
-        print(r.stderr, file=sys.stderr); raise SystemExit(r.returncode)
+        print(r.stderr, file=sys.stderr); sys.exit("__HF_FAILED__")
+if not os.path.exists("${VM_ARROW}"):
+    print(f"ERROR: download reported success but ${VM_ARROW} missing", file=sys.stderr)
+    sys.exit("__HF_MISSING__")
 mb = os.path.getsize("${VM_ARROW}") / (1024*1024)
 print(f"OK: data file is {mb:.0f} MB at ${VM_ARROW}")
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/data.ok","w").close()
 EOF
+run_step data
 
 log "downloading pretrained weights (PP-OCRv6 small rec)"
 "$COLAB" exec -s "$SESSION" --timeout 300 <<EOF
 import subprocess, os, sys
-url = "${PRETRAIN_URL}"
-dest = "${VM_PRETRAIN}.pdparams"   # paddle wants the path without extension; file has it
+dest = "${VM_PRETRAIN}.pdparams"
 if os.path.exists(dest):
     print(f"pretrained weights already present ({os.path.getsize(dest)//1024//1024} MB)")
 else:
-    r = subprocess.run(["curl", "-L", "--fail", "-o", dest, url],
+    r = subprocess.run(["curl", "-L", "--fail", "-o", dest, "${PRETRAIN_URL}"],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        print(r.stderr, file=sys.stderr); raise SystemExit(r.returncode)
+        print(r.stderr, file=sys.stderr); sys.exit("__PRETRAIN_FAILED__")
 print(f"OK: pretrained weights at {dest} ({os.path.getsize(dest)//1024//1024} MB)")
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/pretrain.ok","w").close()
 EOF
+run_step pretrain
 
 # ---------------------------------------------------------------------------
 # 5. EXTRACT: arrow -> crops + dict + label lists
 # ---------------------------------------------------------------------------
 log "extracting dataset (arrow -> PaddleOCR format)"
-# Build the CLI args as a shell string (tokenized by the VM's shell via shell=True),
-# NOT as a Python list — avoids the "shell fragment into Python list" quoting bug.
-EXTRACT_ARGS="--smoke-per-split 5000"   # always keep the 5K smoke subsets for the gate
+EXTRACT_ARGS="--smoke-per-split 5000"
 if [[ -n "$MAX_PER_SPLIT" ]]; then
   EXTRACT_ARGS="--max-per-split ${MAX_PER_SPLIT} ${EXTRACT_ARGS}"
 fi
@@ -256,39 +292,49 @@ cmd = "python scripts/build_paddle_dataset.py --arrow ${VM_ARROW} --out train_da
 r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
 print(r.stdout, end="")
 if r.returncode != 0:
-    print(r.stderr, file=sys.stderr); raise SystemExit(r.returncode)
+    print(r.stderr, file=sys.stderr); sys.exit("__EXTRACT_FAILED__")
+# Verify the expected outputs exist before claiming success.
+for f in ["burmese_dict.txt", "train_list.txt", "val_list.txt", "train_list_smoke.txt"]:
+    p = os.path.join("train_data/burmese_rec", f)
+    if not os.path.exists(p):
+        print(f"ERROR: extraction reported success but {p} missing", file=sys.stderr)
+        sys.exit("__EXTRACT_MISSING__")
+print("OK: extraction produced dict + label lists")
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/extract.ok","w").close()
 EOF
+run_step extract
 
 # ---------------------------------------------------------------------------
 # 6. VERIFY GPU + (OPTIONAL) SMOKE GATE
 # ---------------------------------------------------------------------------
 log "verifying a CUDA GPU is available to paddle"
 "$COLAB" exec -s "$SESSION" --timeout 120 <<EOF
-import paddle
+import paddle, os, sys
 n = paddle.device.cuda.device_count()
-print(f"paddle CUDA device count: {n}")
-print(f"paddle CUDA version: {paddle.version.cuda()}")
-assert n >= 1, "ERROR: no CUDA GPU visible to paddle — aborting before wasting a full run."
+print(f"paddle CUDA device count: {n}, version: {paddle.version.cuda()}")
+if n < 1:
+    print("ERROR: no CUDA GPU visible to paddle", file=sys.stderr); sys.exit("__NO_GPU__")
 print("OK: GPU available")
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/gpu.ok","w").close()
 EOF
+run_step gpu
 
 if [[ "$SMOKE_FIRST" == "1" ]]; then
   log "SMOKE GATE: 1-epoch run on 5K subset (aborts if it fails)"
   "$COLAB" exec -s "$SESSION" --timeout 3600 <<EOF
 import subprocess, sys, os
 os.chdir("${VM_REPO}")
-r = subprocess.run(
-    ["bash", "scripts/train_burmese.sh", "smoke"],
-    capture_output=True, text=True)
-# Print the tail so we see acc/loss even on success.
-out = r.stdout.decode(errors="replace") if isinstance(r.stdout, bytes) else r.stdout
+r = subprocess.run(["bash", "scripts/train_burmese.sh", "smoke"],
+                   capture_output=True, text=True)
+out = r.stdout if isinstance(r.stdout, str) else r.stdout.decode(errors="replace")
 print(out[-4000:])
 if r.returncode != 0:
-    err = r.stderr.decode(errors="replace") if isinstance(r.stderr, bytes) else r.stderr
-    print(err[-2000:], file=sys.stderr)
-    raise SystemExit(r.returncode)
+    err = r.stderr if isinstance(r.stderr, str) else r.stderr.decode(errors="replace")
+    print(err[-2000:], file=sys.stderr); sys.exit("__SMOKE_FAILED__")
 print("OK: smoke run completed")
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/smoke.ok","w").close()
 EOF
+  run_step smoke
 fi
 
 # ---------------------------------------------------------------------------
@@ -310,10 +356,16 @@ out = r.stdout if isinstance(r.stdout, str) else r.stdout.decode(errors="replace
 print(out[-6000:])
 if r.returncode != 0:
     err = r.stderr if isinstance(r.stderr, str) else r.stderr.decode(errors="replace")
-    print(err[-3000:], file=sys.stderr)
-    raise SystemExit(r.returncode)
-print("OK: full training completed")
+    print(err[-3000:], file=sys.stderr); sys.exit("__TRAIN_FAILED__")
+# Verify best_accuracy checkpoint exists.
+ckpt = "./output/burmese_PP-OCRv6_small_rec/best_accuracy.pdparams"
+if not os.path.exists(ckpt):
+    print(f"ERROR: training reported success but {ckpt} missing", file=sys.stderr)
+    sys.exit("__TRAIN_NO_CKPT__")
+print("OK: full training completed, best_accuracy saved")
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/train.ok","w").close()
 EOF
+run_step train
 
 # ---------------------------------------------------------------------------
 # 8. EXPORT (checkpoint -> inference model) + EVAL (final test-split CER)
@@ -328,12 +380,21 @@ r = subprocess.run(
      "-o", "Global.checkpoints=./output/burmese_PP-OCRv6_small_rec/best_accuracy.pdparams",
             "Global.save_inference_dir=./models/burmese_PP-OCRv6_small_rec_infer"],
     capture_output=True, text=True)
-print(r.stdout[-2000:] if isinstance(r.stdout, str) else r.stdout.decode(errors="replace")[-2000:])
+out = r.stdout if isinstance(r.stdout, str) else r.stdout.decode(errors="replace")
+print(out[-2000:])
 if r.returncode != 0:
-    print(r.stderr if isinstance(r.stderr, str) else r.stderr.decode(errors="replace"), file=sys.stderr)
-    raise SystemExit(r.returncode)
+    err = r.stderr if isinstance(r.stderr, str) else r.stderr.decode(errors="replace")
+    print(err[-2000:], file=sys.stderr); sys.exit("__EXPORT_FAILED__")
+# Verify the inference model files exist.
+for f in ["inference.pdmodel", "inference.pdiparams"]:
+    p = os.path.join("./models/burmese_PP-OCRv6_small_rec_infer", f)
+    if not os.path.exists(p):
+        print(f"ERROR: export reported success but {p} missing", file=sys.stderr)
+        sys.exit("__EXPORT_MISSING__")
 print("OK: inference model exported to ${VM_INFER}")
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/export.ok","w").close()
 EOF
+run_step export
 
 log "final eval on held-out test split (CER comparable to Kraken benchmarks)"
 "$COLAB" exec -s "$SESSION" --timeout 1800 <<EOF
@@ -345,44 +406,53 @@ r = subprocess.run(
      "-o", "Eval.dataset.label_file_list=[\"./train_data/burmese_rec/test_list.txt\"]",
             "Global.checkpoints=./output/burmese_PP-OCRv6_small_rec/best_accuracy.pdparams"],
     capture_output=True, text=True)
-print(r.stdout[-2000:] if isinstance(r.stdout, str) else r.stdout.decode(errors="replace")[-2000:])
+out = r.stdout if isinstance(r.stdout, str) else r.stdout.decode(errors="replace")
+print(out[-2500:])
 if r.returncode != 0:
-    print(r.stderr if isinstance(r.stderr, str) else r.stderr.decode(errors="replace"), file=sys.stderr)
-    raise SystemExit(r.returncode)
+    err = r.stderr if isinstance(r.stderr, str) else r.stderr.decode(errors="replace")
+    print(err[-2000:], file=sys.stderr); sys.exit("__EVAL_FAILED__")
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/eval.ok","w").close()
 EOF
+run_step eval
 
 # ---------------------------------------------------------------------------
 # 9. ZIP THE INFERENCE MODEL, DOWNLOAD LOCALLY, (OPTIONAL) DRIVE BACKUP
 # ---------------------------------------------------------------------------
 log "zipping inference model"
 "$COLAB" exec -s "$SESSION" --timeout 600 <<EOF
-import shutil, os
+import shutil, os, sys
 src = "${VM_INFER}"
 dst_zip = "/content/burmese_infer.zip"
 if not os.path.isdir(src):
-    raise SystemExit(f"ERROR: inference dir {src} does not exist")
+    print(f"ERROR: inference dir {src} does not exist", file=sys.stderr)
+    sys.exit("__ZIP_NO_SRC__")
 shutil.make_archive(dst_zip[:-4], "zip", root_dir=os.path.dirname(src),
                     base_dir=os.path.basename(src))
 print(f"OK: archive {os.path.getsize(dst_zip)//1024} KB at {dst_zip}")
+os.makedirs("${SENTINEL_DIR}", exist_ok=True); open("${SENTINEL_DIR}/zip.ok","w").close()
 EOF
+run_step zip
 
 log "downloading inference zip → ${LOCAL_DIR}/"
 mkdir -p "$LOCAL_DIR"
-if "$COLAB" download -s "$SESSION" "/content/burmese_infer.zip" "${LOCAL_DIR}/burmese_infer.zip" 2>/dev/null; then
+if "$COLAB" download -s "$SESSION" "/content/burmese_infer.zip" "${LOCAL_DIR}/burmese_infer.zip"; then
   echo "[script] downloaded ${LOCAL_DIR}/burmese_infer.zip"
   echo "[script] unzip with: cd ${LOCAL_DIR} && unzip burmese_infer.zip"
 else
-  echo "[script] WARNING: local download failed." >&2
+  echo "[script] WARNING: local download failed — check Drive backup if enabled." >&2
 fi
 
 if [[ "$DRIVE_BACKUP" == "1" ]]; then
   log "mounting Drive for output backup → ${REMOTE_ZIP}"
   "$COLAB" drivemount -s "$SESSION" || true
   "$COLAB" exec -s "$SESSION" --timeout 300 <<EOF
-import shutil, os
+import shutil, os, sys
 os.makedirs("${DRIVE_BASE}", exist_ok=True)
-shutil.copy("/content/burmese_infer.zip", "${REMOTE_ZIP}")
-print(f"OK: Drive backup at ${REMOTE_ZIP}")
+try:
+    shutil.copy("/content/burmese_infer.zip", "${REMOTE_ZIP}")
+    print(f"OK: Drive backup at ${REMOTE_ZIP}")
+except Exception as e:
+    print(f"WARNING: Drive backup failed: {e}", file=sys.stderr)
 EOF
 fi
 

@@ -12,7 +12,13 @@
 # Run from repo root. Uses .venv/bin/python (paddle 3.3.1, CPU-only wheel on macOS).
 set -euo pipefail
 
-PY=.venv/bin/python
+# Resolve python: prefer the repo's .venv (local dev), fall back to system python
+# (Colab VM has no .venv — python is at /usr/local/bin/python).
+if [[ -x .venv/bin/python ]]; then
+  PY=.venv/bin/python
+else
+  PY=python
+fi
 CFG=configs/rec/PP-OCRv6/burmese_PP-OCRv6_small_rec.yml
 OUT=output/burmese_PP-OCRv6_small_rec
 
