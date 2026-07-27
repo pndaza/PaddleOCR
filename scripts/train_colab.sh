@@ -58,10 +58,14 @@ DRIVE_BACKUP="${DRIVE_BACKUP:-1}"     # 1 = mount Drive and copy the output zip 
 # Pretrained rec weights (official PP-OCRv6 small rec).
 PRETRAIN_URL="https://paddle-model-ecology.bj.bcebos.com/paddlex/official_pretrained_model/PP-OCRv6_small_rec_pretrained.pdparams"
 
-# Paddle GPU wheel — Baidu cu126 index (bundles CUDA 12.6 + cuDNN; works on Colab
-# regardless of host CUDA, per docs/version3.x/paddlepaddle_installation.en.md).
-PADDLE_PKG="paddlepaddle-gpu==3.2.0"
-PADDLE_INDEX="https://www.paddlepaddle.org.cn/packages/stable/cu126/"
+# Paddle GPU wheel. Default to PyPI (fast, reliable CDN from Colab). If the
+# PyPI wheel ever ships a non-CUDA build for Colab's env, override to the
+# Baidu cu126 index (bundles CUDA 12.6 + cuDNN) via:
+#   PADDLE_INDEX=https://www.paddlepaddle.org.cn/packages/stable/cu126/ bash scripts/train_colab.sh
+# Either way, the install step asserts paddle.device.is_compiled_with_cuda()
+# right after, so a wrong wheel fails fast.
+PADDLE_PKG="${PADDLE_PKG:-paddlepaddle-gpu==3.2.0}"
+PADDLE_INDEX="${PADDLE_INDEX:-}"   # empty = plain PyPI
 
 # Derived paths (VM-local).
 VM_REPO="/content/PaddleOCR"
@@ -202,15 +206,15 @@ run_step clone
 # ---------------------------------------------------------------------------
 # 3. INSTALL PADDLE (GPU) + REPO REQUIREMENTS
 # ---------------------------------------------------------------------------
-log "installing ${PADDLE_PKG} from Baidu cu126 index (this can take a few minutes)"
+log "installing ${PADDLE_PKG} from $([[ -n "$PADDLE_INDEX" ]] && echo "$PADDLE_INDEX" || echo "PyPI")"
 "$COLAB" exec -s "$SESSION" --timeout 1800 <<EOF
 import subprocess, sys, os
-r = subprocess.run(
-    [sys.executable, "-m", "pip", "install",
-     "--timeout", "300", "--retries", "5",
-     "-i", "${PADDLE_INDEX}",
-     "${PADDLE_PKG}"],
-    capture_output=True, text=True)
+cmd = [sys.executable, "-m", "pip", "install",
+       "--timeout", "300", "--retries", "5"]
+if "${PADDLE_INDEX}":           # empty string → False → use plain PyPI
+    cmd += ["-i", "${PADDLE_INDEX}"]
+cmd += ["${PADDLE_PKG}"]
+r = subprocess.run(cmd, capture_output=True, text=True)
 print(r.stdout[-2000:])
 if r.returncode != 0:
     print(r.stderr[-2000:], file=sys.stderr); sys.exit("__PADDLE_FAILED__")
