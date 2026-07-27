@@ -52,7 +52,7 @@ HF_FILE="${HF_FILE:-burmese_kraken_1m.arrow}"
 # to Dropbox — the VM downloads + unzips instead of downloading the 1.1 GB arrow
 # from HuggingFace AND extracting on the VM (which was slow + colab-exec flaky).
 # Dropbox: append ?dl=1 to the share link for direct download.
-DATASET_ZIP_URL="${DATASET_ZIP_URL:-}"   # empty = fall back to HF arrow + on-VM extract
+DATASET_ZIP_URL="${DATASET_ZIP_URL:-https://www.dropbox.com/scl/fi/ibvp1cjeoi6jlnjp34icm/burmese_rec_dataset.zip?rlkey=00iknrubirk4ubcfayiji8bn6&st=v3175nwf&dl=1}"
 
 # Training knobs.
 EPOCHS="${EPOCHS:-30}"
