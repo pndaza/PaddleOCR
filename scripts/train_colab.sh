@@ -200,20 +200,32 @@ print("launched ${name} in background; polling for sentinel")
 EOF
   echo "[script] launched '${name}' in background; polling (timeout ${tmo}s)"
   # Poll loop: check sentinel every 15s, tail the log for live progress.
+  # Also detect a DEAD background process — if it's no longer running AND the
+  # sentinel isn't written, the step crashed (fail fast instead of waiting the
+  # full timeout blind).
   local start=$(( $(date +%s) ))
   local last_size=0
+  # Give it a 5s grace period before checking liveness (process may not have
+  # started yet when we first poll).
+  sleep 5
   while :; do
     if [[ "$(_check_sentinel "$name")" == "PRESENT" ]]; then
       echo "[script] ✓ step '${name}' OK"
-      # print the tail of the log one last time so the final messages show
       _tail_log "$name" "$last_size"
       return 0
+    fi
+    # is the background process still alive?
+    if [[ "$(_check_alive "$name")" != "ALIVE" ]]; then
+      echo "[script] ✗ step '${name}' process exited without writing sentinel — FAILED." >&2
+      echo "[script]   tail of log:" >&2
+      _tail_log "$name" "$last_size" >&2
+      exit 1
     fi
     # check for timeout
     local now=$(( $(date +%s) ))
     if (( now - start > tmo )); then
       echo "[script] ✗ step '${name}' TIMED OUT after ${tmo}s — aborting." >&2
-      _tail_log "$name" "$last_size"
+      _tail_log "$name" "$last_size" >&2
       exit 1
     fi
     # stream any new log output
@@ -221,6 +233,22 @@ EOF
     last_size=$(_log_size "$name")
     sleep 15
   done
+}
+
+# _check_alive <name>: is the background python for this step still running?
+# Looks for a process running "<name>.py". Prints ALIVE or DEAD.
+_check_alive() {
+  local name="$1"
+  local out
+  out="$("$COLAB" exec -s "$SESSION" --timeout 20 <<EOF
+import subprocess
+# pgrep for the step script file. -f matches the full command line.
+r = subprocess.run(["pgrep", "-f", "${SENTINEL_DIR}/${name}.py"],
+                   capture_output=True, text=True)
+print("ALIVE" if r.returncode == 0 else "DEAD")
+EOF
+)" 2>/dev/null
+  if echo "$out" | grep -q "ALIVE"; then echo ALIVE; else echo DEAD; fi
 }
 
 # _log_size / _tail_log: helpers to stream the VM log file incrementally.
@@ -240,10 +268,9 @@ p = "${SENTINEL_DIR}/${name}.log"
 if os.path.exists(p):
     size = os.path.getsize(p)
     if size > ${since}:
-        with open(p, "rb") as f:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
             f.seek(${since})
-            import sys
-            sys.stdout.buffer.write(f.read(size - ${since}))
+            print(f.read(), end="")
 EOF
 }
 
