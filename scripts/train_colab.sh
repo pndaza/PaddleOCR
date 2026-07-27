@@ -226,7 +226,10 @@ wheel_url = "${PADDLE_WHEEL_URL}"
 if wheel_url:
     # Download the wheel directly (Dropbox/Drive direct link), then pip install
     # the local file. Faster and resumable (curl -C -) than pip from Baidu CDN.
-    dest = "/content/paddle.whl"
+    # IMPORTANT: preserve the real wheel filename — pip validates the filename
+    # (cp312, linux_x86_64, etc.) and rejects a bare 'paddle.whl' before even
+    # looking at the contents.
+    dest = "/content/paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl"
     r = subprocess.run(["curl", "-L", "--fail", "-C", "-", "-o", dest, wheel_url],
                        capture_output=True, text=True)
     if r.returncode != 0:
