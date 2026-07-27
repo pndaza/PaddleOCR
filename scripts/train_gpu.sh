@@ -47,8 +47,13 @@ FORK_BRANCH="${FORK_BRANCH:-burmese-rec-finetune}"
 #      is required. Paddle 3.x is NOT on PyPI (only 2.6.x).
 #   2. PADDLE_WHEEL_URL — a direct .whl URL (e.g. a Dropbox mirror). Use ONLY if
 #      it matches the box's Python tag exactly (cp312 wheel won't install on 3.10).
-PADDLE_INDEX="${PADDLE_INDEX:-https://www.paddlepaddle.org.cn/packages/stable/cu126/}"
-PADDLE_PKG="${PADDLE_PKG:-paddlepaddle-gpu==3.2.0}"
+#
+# CUDA index MUST match the GPU's compute capability:
+#   - cu126 (paddle 3.2.0): max sm_90 (Ada/Hopper). Does NOT support Blackwell.
+#   - cu130 (paddle 3.3.x): sm_120 (Blackwell RTX 50-series). Use this for RTX 5060/5090 etc.
+# The default (cu130 + 3.3.1) supports both Blackwell and older GPUs.
+PADDLE_INDEX="${PADDLE_INDEX:-https://www.paddlepaddle.org.cn/packages/stable/cu130/}"
+PADDLE_PKG="${PADDLE_PKG:-paddlepaddle-gpu==3.3.1}"
 PADDLE_WHEEL_URL="${PADDLE_WHEEL_URL:-}"
 
 # Pre-built dataset zip (Dropbox mirror of train_data/burmese_rec/, 1.3 GB).
