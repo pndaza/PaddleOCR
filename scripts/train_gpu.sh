@@ -132,6 +132,14 @@ do_setup() {
   ensure_pip
   "${PIP_INSTALL[@]}" -r "$REPO/requirements.txt"
 
+  # 3b. System libs that opencv (cv2) needs at import time. Minimal images lack
+  # these; without them `import albumentations` → ImportError: libGL/libxcb.
+  if ! python3 -c "import cv2" 2>/dev/null; then
+    log "cv2 won't import — installing system libs (libgl1, libglib2.0-0, libxcb1)"
+    apt-get update -qq
+    apt-get install -y -qq libgl1 libglib2.0-0 libxcb1
+  fi
+
   # 4. Download the pre-built dataset zip + extract (Python zipfile — no `unzip` dep).
   if [[ -f "$REPO/train_data/burmese_rec/burmese_dict.txt" ]]; then
     log "dataset already present at $REPO/train_data/burmese_rec/ — skipping"
