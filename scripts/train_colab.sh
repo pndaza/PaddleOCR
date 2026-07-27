@@ -58,14 +58,14 @@ DRIVE_BACKUP="${DRIVE_BACKUP:-1}"     # 1 = mount Drive and copy the output zip 
 # Pretrained rec weights (official PP-OCRv6 small rec).
 PRETRAIN_URL="https://paddle-model-ecology.bj.bcebos.com/paddlex/official_pretrained_model/PP-OCRv6_small_rec_pretrained.pdparams"
 
-# Paddle GPU wheel. Default to PyPI (fast, reliable CDN from Colab). If the
-# PyPI wheel ever ships a non-CUDA build for Colab's env, override to the
-# Baidu cu126 index (bundles CUDA 12.6 + cuDNN) via:
-#   PADDLE_INDEX=https://www.paddlepaddle.org.cn/packages/stable/cu126/ bash scripts/train_colab.sh
-# Either way, the install step asserts paddle.device.is_compiled_with_cuda()
-# right after, so a wrong wheel fails fast.
+# Paddle GPU wheel. Paddle 3.x is NOT published to PyPI (only 2.6.x is), so
+# the Baidu cu126 index is the only source. It bundles CUDA 12.6 + cuDNN, so
+# it works on Colab regardless of host CUDA (per docs/version3.x/
+# paddlepaddle_installation.en.md). The install step asserts
+# paddle.device.is_compiled_with_cuda() right after, so a wrong wheel fails
+# fast with a clear message.
 PADDLE_PKG="${PADDLE_PKG:-paddlepaddle-gpu==3.2.0}"
-PADDLE_INDEX="${PADDLE_INDEX:-}"   # empty = plain PyPI
+PADDLE_INDEX="${PADDLE_INDEX:-https://www.paddlepaddle.org.cn/packages/stable/cu126/}"
 
 # Derived paths (VM-local).
 VM_REPO="/content/PaddleOCR"
