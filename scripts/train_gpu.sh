@@ -83,6 +83,12 @@ ensure_pip() {
 
 log() { printf '\n[setup] %s\n' "$*"; }
 
+# Resolve a python interpreter. Minimal images ship only `python3`, not `python`;
+# venvs ship `.venv/bin/python`. Prefer a venv if present, else fall back.
+if [[ -x "${REPO}/.venv/bin/python" ]]; then PY="${REPO}/.venv/bin/python";
+elif command -v python >/dev/null 2>&1; then PY=python;
+else PY=python3; fi
+
 # ---------------------------------------------------------------------------
 # PHASE: setup — clone repo, install paddle + deps, fetch data + weights
 # ---------------------------------------------------------------------------
@@ -189,7 +195,7 @@ do_train() {
   # Build the training command (runs inside tmux, logs to file as a backup).
   # Note: --use_gpu is implicit from the config; we just override epochs + batch.
   tmux new-session -d -s train "cd '$REPO' && \
-    python tools/train.py \
+    '$PY' tools/train.py \
       -c '$CFG' \
       -o Global.epoch_num=${EPOCHS} \
          Train.loader.batch_size_per_card=${BATCH_SIZE} \
@@ -208,7 +214,7 @@ do_export() {
   local ckpt="${OUT}/best_accuracy.pdparams"
   [[ -f "$ckpt" ]] || { log "ERROR: checkpoint $ckpt not found — did training finish?"; exit 1; }
   log "exporting inference model from $ckpt"
-  python tools/export_model.py \
+  "$PY" tools/export_model.py \
     -c "$CFG" \
     -o Global.checkpoints="$ckpt" \
        Global.save_inference_dir="${REPO}/models/burmese_PP-OCRv6_small_rec_infer"
@@ -228,7 +234,7 @@ do_eval() {
   local ckpt="${OUT}/best_accuracy.pdparams"
   [[ -f "$ckpt" ]] || { log "ERROR: checkpoint $ckpt not found"; exit 1; }
   log "running final eval on held-out test split"
-  python tools/eval.py \
+  "$PY" tools/eval.py \
     -c "$CFG" \
     -o 'Eval.dataset.label_file_list=["./train_data/burmese_rec/test_list.txt"]' \
        Global.checkpoints="$ckpt"
