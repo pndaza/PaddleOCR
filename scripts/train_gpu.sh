@@ -126,7 +126,7 @@ do_setup() {
   ensure_pip
   "${PIP_INSTALL[@]}" -r "$REPO/requirements.txt"
 
-  # 4. Download the pre-built dataset zip + unzip.
+  # 4. Download the pre-built dataset zip + extract (Python zipfile — no `unzip` dep).
   if [[ -f "$REPO/train_data/burmese_rec/burmese_dict.txt" ]]; then
     log "dataset already present at $REPO/train_data/burmese_rec/ — skipping"
   else
@@ -134,8 +134,15 @@ do_setup() {
     zip="/tmp/burmese_rec_dataset.zip"
     curl -L --fail -C - -o "$zip" "$DATASET_ZIP_URL"
     mkdir -p "$REPO/train_data"
-    log "unzipping dataset"
-    unzip -o -q "$zip" -d "$REPO/train_data"
+    log "extracting dataset (python zipfile)"
+    # Minimal vast.ai images have no `unzip`; use Python's stdlib instead.
+    python3 - "$zip" "$REPO/train_data" <<'PY'
+import sys, zipfile, os
+src, dst = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(src) as z:
+    z.extractall(dst)
+print(f"extracted {len(os.listdir(dst))} top-level entries to {dst}")
+PY
     rm -f "$zip"
     # Verify key outputs.
     for f in burmese_dict.txt train_list.txt val_list.txt test_list.txt; do
