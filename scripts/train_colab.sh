@@ -58,14 +58,19 @@ DRIVE_BACKUP="${DRIVE_BACKUP:-1}"     # 1 = mount Drive and copy the output zip 
 # Pretrained rec weights (official PP-OCRv6 small rec).
 PRETRAIN_URL="https://paddle-model-ecology.bj.bcebos.com/paddlex/official_pretrained_model/PP-OCRv6_small_rec_pretrained.pdparams"
 
-# Paddle GPU wheel. Paddle 3.x is NOT published to PyPI (only 2.6.x is), so
-# the Baidu cu126 index is the only source. It bundles CUDA 12.6 + cuDNN, so
-# it works on Colab regardless of host CUDA (per docs/version3.x/
-# paddlepaddle_installation.en.md). The install step asserts
-# paddle.device.is_compiled_with_cuda() right after, so a wrong wheel fails
-# fast with a clear message.
+# Paddle GPU wheel. Paddle 3.x is NOT published to PyPI (only 2.6.x is); the
+# only publisher is the Baidu cu126 index (bundles CUDA 12.6 + cuDNN). That
+# CDN is slow/unreliable from Colab, so prefer a direct wheel URL when set.
+#
+# Recommended: pre-download the wheel from
+#   https://paddle-whl.bj.bcebos.com/stable/cu126/paddlepaddle-gpu/paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl
+# (fast on a home connection), upload to Dropbox/Drive, and point the VM at it:
+#   PADDLE_WHEEL_URL='https://www.dropbox.com/s/<id>/paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl?dl=1' bash scripts/train_colab.sh
+# (Dropbox: append ?dl=1 to the share link for direct download.)
+# When PADDLE_WHEEL_URL is empty, falls back to pip install from PADDLE_INDEX.
 PADDLE_PKG="${PADDLE_PKG:-paddlepaddle-gpu==3.2.0}"
 PADDLE_INDEX="${PADDLE_INDEX:-https://www.paddlepaddle.org.cn/packages/stable/cu126/}"
+PADDLE_WHEEL_URL="${PADDLE_WHEEL_URL:-}"   # empty = use PADDLE_INDEX; set = curl the wheel directly
 
 # Derived paths (VM-local).
 VM_REPO="/content/PaddleOCR"
@@ -206,14 +211,27 @@ run_step clone
 # ---------------------------------------------------------------------------
 # 3. INSTALL PADDLE (GPU) + REPO REQUIREMENTS
 # ---------------------------------------------------------------------------
-log "installing ${PADDLE_PKG} from $([[ -n "$PADDLE_INDEX" ]] && echo "$PADDLE_INDEX" || echo "PyPI")"
+if [[ -n "$PADDLE_WHEEL_URL" ]]; then
+  log "installing paddle from wheel: ${PADDLE_WHEEL_URL}"
+else
+  log "installing ${PADDLE_PKG} from Baidu index ${PADDLE_INDEX}"
+fi
 "$COLAB" exec -s "$SESSION" --timeout 1800 <<EOF
 import subprocess, sys, os
-cmd = [sys.executable, "-m", "pip", "install",
-       "--timeout", "300", "--retries", "5"]
-if "${PADDLE_INDEX}":           # empty string → False → use plain PyPI
-    cmd += ["-i", "${PADDLE_INDEX}"]
-cmd += ["${PADDLE_PKG}"]
+wheel_url = "${PADDLE_WHEEL_URL}"
+if wheel_url:
+    # Download the wheel directly (Dropbox/Drive direct link), then pip install
+    # the local file. Faster and resumable (curl -C -) than pip from Baidu CDN.
+    dest = "/content/paddle.whl"
+    r = subprocess.run(["curl", "-L", "--fail", "-C", "-", "-o", dest, wheel_url],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(r.stderr, file=sys.stderr); sys.exit("__PADDLE_FAILED__")
+    cmd = [sys.executable, "-m", "pip", "install", dest]
+else:
+    cmd = [sys.executable, "-m", "pip", "install",
+           "--timeout", "300", "--retries", "5",
+           "-i", "${PADDLE_INDEX}", "${PADDLE_PKG}"]
 r = subprocess.run(cmd, capture_output=True, text=True)
 print(r.stdout[-2000:])
 if r.returncode != 0:
