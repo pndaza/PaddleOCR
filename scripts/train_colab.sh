@@ -70,7 +70,11 @@ PRETRAIN_URL="https://paddle-model-ecology.bj.bcebos.com/paddlex/official_pretra
 # When PADDLE_WHEEL_URL is empty, falls back to pip install from PADDLE_INDEX.
 PADDLE_PKG="${PADDLE_PKG:-paddlepaddle-gpu==3.2.0}"
 PADDLE_INDEX="${PADDLE_INDEX:-https://www.paddlepaddle.org.cn/packages/stable/cu126/}"
-PADDLE_WHEEL_URL="${PADDLE_WHEEL_URL:-}"   # empty = use PADDLE_INDEX; set = curl the wheel directly
+# Default wheel source: a Dropbox mirror of paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl
+# (downloaded once from Baidu, uploaded to Dropbox — fast CDN from Colab, no per-session
+# 1.9 GB download from paddle-whl.bj.bcebos.com). Override with any other direct (?dl=1) URL,
+# or set PADDLE_WHEEL_URL='' to fall back to the Baidu pip index.
+PADDLE_WHEEL_URL="${PADDLE_WHEEL_URL:-https://www.dropbox.com/scl/fi/71xe2qpsxd31e5wpe4k17/paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl?rlkey=qz4u9xupt42x9kdc6561l1fia&st=7wx7lezq&dl=1}"
 
 # Derived paths (VM-local).
 VM_REPO="/content/PaddleOCR"
