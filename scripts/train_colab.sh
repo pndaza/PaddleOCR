@@ -189,7 +189,10 @@ bg_step() {
 import os, subprocess, base64, sys
 os.makedirs("${SENTINEL_DIR}", exist_ok=True)
 script = base64.b64decode("${b64}").decode("utf-8")
-path = "${SENTINEL_DIR}/${name}.py"
+# Prefix with step_ so the filename can't shadow a real import (e.g. a step
+# named 'paddle' would otherwise make `import paddle` resolve to the step
+# script itself → 'partially initialized module' circular-import error).
+path = "${SENTINEL_DIR}/step_${name}.py"
 open(path, "w").write(script)
 # Launch detached: nohup, new session, output to the step's log.
 log = "${SENTINEL_DIR}/${name}.log"
@@ -236,14 +239,14 @@ EOF
 }
 
 # _check_alive <name>: is the background python for this step still running?
-# Looks for a process running "<name>.py". Prints ALIVE or DEAD.
+# Looks for a process running "step_<name>.py". Prints ALIVE or DEAD.
 _check_alive() {
   local name="$1"
   local out
   out="$("$COLAB" exec -s "$SESSION" --timeout 20 <<EOF
 import subprocess
 # pgrep for the step script file. -f matches the full command line.
-r = subprocess.run(["pgrep", "-f", "${SENTINEL_DIR}/${name}.py"],
+r = subprocess.run(["pgrep", "-f", "${SENTINEL_DIR}/step_${name}.py"],
                    capture_output=True, text=True)
 print("ALIVE" if r.returncode == 0 else "DEAD")
 EOF
@@ -343,24 +346,38 @@ else
   log "installing ${PADDLE_PKG} from Baidu index ${PADDLE_INDEX}"
 fi
 # Paddle install can take a few minutes (1.9 GB wheel) — background it.
+# NOTE: Colab images increasingly ship paddlepaddle-gpu preinstalled. Check first;
+# only install when missing or non-CUDA-built.
 bg_step paddle 900 <<EOF
-import subprocess, sys, os
-wheel_url = "${PADDLE_WHEEL_URL}"
-if wheel_url:
-    dest = "/content/paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl"
-    r = subprocess.run(["curl", "-L", "--fail", "-C", "-", "-o", dest, wheel_url],
-                       capture_output=True, text=True)
-    if r.returncode != 0:
-        print(r.stderr, file=sys.stderr); sys.exit(1)
-    cmd = [sys.executable, "-m", "pip", "install", dest]
+import subprocess, sys, os, importlib
+def have_cuda_paddle():
+    try:
+        import paddle
+        return paddle.device.is_compiled_with_cuda()
+    except Exception:
+        return False
+if have_cuda_paddle():
+    import paddle
+    print(f"paddle {paddle.__version__} already CUDA-built — skipping install")
 else:
-    cmd = [sys.executable, "-m", "pip", "install",
-           "--timeout", "300", "--retries", "5",
-           "-i", "${PADDLE_INDEX}", "${PADDLE_PKG}"]
-r = subprocess.run(cmd, capture_output=True, text=True)
-print(r.stdout[-2000:])
-if r.returncode != 0:
-    print(r.stderr[-2000:], file=sys.stderr); sys.exit(1)
+    wheel_url = "${PADDLE_WHEEL_URL}"
+    if wheel_url:
+        dest = "/content/paddlepaddle_gpu-3.2.0-cp312-cp312-linux_x86_64.whl"
+        r = subprocess.run(["curl", "-L", "--fail", "-C", "-", "-o", dest, wheel_url],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr, file=sys.stderr); sys.exit(1)
+        cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall",
+               "--no-deps", dest]
+    else:
+        cmd = [sys.executable, "-m", "pip", "install",
+               "--timeout", "300", "--retries", "5",
+               "-i", "${PADDLE_INDEX}", "${PADDLE_PKG}"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    print(r.stdout[-2000:])
+    if r.returncode != 0:
+        print(r.stderr[-2000:], file=sys.stderr); sys.exit(1)
+# Final verify (after install or skip): paddle imports and is CUDA-built.
 import paddle
 assert paddle.device.is_compiled_with_cuda(), "paddle NOT compiled with CUDA — wrong wheel"
 print(f"OK: paddle {paddle.__version__}, cuda compiled: {paddle.device.is_compiled_with_cuda()}")
