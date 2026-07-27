@@ -162,7 +162,26 @@ EOF
 # 3. INSTALL PADDLE (GPU) + REPO REQUIREMENTS
 # ---------------------------------------------------------------------------
 log "installing ${PADDLE_PKG} from Baidu cu126 index (this can take a few minutes)"
-"$COLAB" install -s "$SESSION" "${PADDLE_PKG}" -i "${PADDLE_INDEX}" --extra-index-url "${PADDLE_INDEX}"
+# Run pip directly on the VM via `colab exec` — `colab install` doesn't accept
+# pip's -i/--extra-index-url flags, so we bypass it for the index-URL case.
+"$COLAB" exec -s "$SESSION" --timeout 900 <<EOF
+import subprocess, sys
+# Inline pip global options before the package name (pip syntax).
+r = subprocess.run(
+    [sys.executable, "-m", "pip", "install",
+     "-i", "${PADDLE_INDEX}",
+     "${PADDLE_PKG}"],
+    capture_output=True, text=True)
+print(r.stdout[-2000:])
+if r.returncode != 0:
+    print(r.stderr[-2000:], file=sys.stderr)
+    raise SystemExit(r.returncode)
+# Verify the GPU build actually loaded.
+import paddle
+assert paddle.device.is_compiled_with_cuda(), \
+    "paddlepaddle-gpu installed but NOT compiled with CUDA — wrong wheel"
+print(f"OK: paddle {paddle.__version__}, cuda compiled: {paddle.device.is_compiled_with_cuda()}")
+EOF
 
 log "installing repo requirements.txt"
 "$COLAB" install -s "$SESSION" -r "${VM_REPO}/requirements.txt"
