@@ -164,11 +164,15 @@ EOF
 log "installing ${PADDLE_PKG} from Baidu cu126 index (this can take a few minutes)"
 # Run pip directly on the VM via `colab exec` — `colab install` doesn't accept
 # pip's -i/--extra-index-url flags, so we bypass it for the index-URL case.
-"$COLAB" exec -s "$SESSION" --timeout 900 <<EOF
+# The Baidu CDN (paddle-whl.bj.bcebos.com) is 1.9 GB and has timed out from
+# Colab's network before, so raise pip's read timeout and retry count well
+# above defaults.
+"$COLAB" exec -s "$SESSION" --timeout 1800 <<EOF
 import subprocess, sys
-# Inline pip global options before the package name (pip syntax).
 r = subprocess.run(
     [sys.executable, "-m", "pip", "install",
+     "--timeout", "300",       # per-read timeout (s); default 15 is too short for 1.9 GB
+     "--retries", "5",         # retry on transient CDN errors
      "-i", "${PADDLE_INDEX}",
      "${PADDLE_PKG}"],
     capture_output=True, text=True)
@@ -184,7 +188,20 @@ print(f"OK: paddle {paddle.__version__}, cuda compiled: {paddle.device.is_compil
 EOF
 
 log "installing repo requirements.txt"
-"$COLAB" install -s "$SESSION" -r "${VM_REPO}/requirements.txt"
+# `colab install -r` reads the file from the LOCAL machine, not the VM, so it
+# can't see /content/PaddleOCR/requirements.txt. Run pip on the VM against the
+# already-cloned file instead.
+"$COLAB" exec -s "$SESSION" --timeout 600 <<EOF
+import subprocess, sys
+r = subprocess.run(
+    [sys.executable, "-m", "pip", "install", "-r", "${VM_REPO}/requirements.txt"],
+    capture_output=True, text=True)
+print(r.stdout[-1500:])
+if r.returncode != 0:
+    print(r.stderr[-1500:], file=sys.stderr)
+    raise SystemExit(r.returncode)
+print("OK: repo requirements installed")
+EOF
 
 # ---------------------------------------------------------------------------
 # 4. DOWNLOAD DATA (HuggingFace) + PRETRAINED WEIGHTS
