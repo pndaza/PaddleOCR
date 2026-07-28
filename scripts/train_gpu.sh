@@ -66,8 +66,11 @@ EPOCHS="${EPOCHS:-30}"
 # with fix_bs:false self-throttles taller heights (actual ~64/48/38).
 BATCH_SIZE="${BATCH_SIZE:-64}"
 
-CFG="${REPO}/configs/rec/PP-OCRv6/burmese_PP-OCRv6_small_rec.yml"
-OUT="${REPO}/output/burmese_PP-OCRv6_small_rec"
+# Config + output dir. OUT defaults to output/<config-basename> so multiple
+# configs (fine-tune vs from-scratch) don't collide. Override either on the CLI:
+#   CFG=.../scratch.yml EPOCHS=100 bash train_gpu.sh train
+CFG="${CFG:-${REPO}/configs/rec/PP-OCRv6/burmese_PP-OCRv6_small_rec.yml}"
+OUT="${OUT:-${REPO}/output/$(basename "${CFG}" .yml)}"
 
 # Detect pip flag for Ubuntu 24.04 (externally-managed-environment restriction).
 PIP_INSTALL=(python3 -m pip install)
@@ -226,17 +229,18 @@ do_export() {
   cd "$REPO"
   local ckpt="${OUT}/best_accuracy.pdparams"
   [[ -f "$ckpt" ]] || { log "ERROR: checkpoint $ckpt not found — did training finish?"; exit 1; }
-  log "exporting inference model from $ckpt"
+  local infer_dir="${REPO}/models/$(basename "${CFG}" .yml)_infer"
+  log "exporting inference model from $ckpt -> $infer_dir"
   "$PY" tools/export_model.py \
     -c "$CFG" \
     -o Global.checkpoints="$ckpt" \
-       Global.save_inference_dir="${REPO}/models/burmese_PP-OCRv6_small_rec_infer"
+       Global.save_inference_dir="$infer_dir"
   # Verify outputs.
   for f in inference.pdmodel inference.pdiparams; do
-    [[ -f "${REPO}/models/burmese_PP-OCRv6_small_rec_infer/$f" ]] \
+    [[ -f "${infer_dir}/$f" ]] \
       || { log "ERROR: $f missing after export"; exit 1; }
   done
-  log "OK: inference model exported to ${REPO}/models/burmese_PP-OCRv6_small_rec_infer/"
+  log "OK: inference model exported to ${infer_dir}/"
 }
 
 # ---------------------------------------------------------------------------
